@@ -2,6 +2,7 @@ mod cache;
 mod conversions;
 mod file_wrapper;
 mod icicle_helper;
+mod not_async_proof_helper;
 mod proof_helper;
 mod zkey;
 
@@ -10,9 +11,10 @@ pub use cache::{CacheManager, ZKeyCache};
 use file_wrapper::FileWrapper;
 use icicle_bn254::curve::{CurveCfg, G2CurveCfg, ScalarField};
 use icicle_core::curve::{Affine, Projective};
+use not_async_proof_helper::groth16_prove_helper_not_async;
 use proof_helper::{groth16_prove_helper, groth16_verify_helper, Proof};
-use std::time::Instant;
 use serde_json;
+use std::time::Instant;
 
 pub type F = ScalarField;
 pub type C1 = CurveCfg;
@@ -77,6 +79,36 @@ pub fn groth16_verify(
     let pairing_result = groth16_verify_helper(&proof, &public, &vk)?;
 
     assert!(pairing_result, "Verification failed");
+
+    Ok(())
+}
+
+pub fn groth16_prove_not_async(
+    witness: &str,
+    zkey: &str,
+    proof: &str,
+    public: &str,
+    device: &str,
+    cache_manager: &mut CacheManager,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    try_load_and_set_backend_device(device);
+
+    let cache_key = format!("{}_{}", zkey, device);
+
+    if !cache_manager.contains(&cache_key) {
+        let computed_cache = cache_manager.compute(zkey)?;
+        cache_manager.insert_cache(&cache_key, computed_cache);
+    }
+
+    let zkey_cache = cache_manager.get_cache(&cache_key);
+
+    let (proof_data, public_signals) = groth16_prove_helper_not_async(witness, zkey_cache)?;
+
+    FileWrapper::save_json_file(proof, &proof_data)?;
+    FileWrapper::save_json_file(public, &public_signals)?;
+
+    println!("proof (not async) took: {:?}", start.elapsed());
 
     Ok(())
 }

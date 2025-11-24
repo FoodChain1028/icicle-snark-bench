@@ -1,4 +1,4 @@
-use icicle_snark::{groth16_prove, groth16_verify, CacheManager};
+use icicle_snark::{groth16_prove, groth16_prove_not_async, groth16_verify, CacheManager};
 use std::time::{Duration, Instant};
 const NUMBER_OF_WARMUP: usize = 2;
 const NUMBER_OF_ITERATIONS: usize = 5;
@@ -19,9 +19,9 @@ fn main() {
 
     for i in 0..NUMBER_OF_ITERATIONS {
         let start = Instant::now();
-        
+
         groth16_prove(&witness, &zkey, &proof, &public, device, &mut cache_manager).unwrap();
-        
+
         let duration = start.elapsed();
 
         let start = Instant::now();
@@ -29,17 +29,54 @@ fn main() {
         groth16_verify(&proof, &public, &vk).unwrap();
 
         println!("verification took: {:?}", start.elapsed());
-        
+
         if i >= NUMBER_OF_WARMUP {
             durations.push(duration);
         }
     }
-    
+
     if !durations.is_empty() {
         let avg_time = durations.iter().sum::<Duration>() / durations.len() as u32;
-        println!("Average running time for {} on {}: {:?}", base_path, device, avg_time);
+        println!(
+            "Average running time for {} on {}: {:?}",
+            base_path, device, avg_time
+        );
         results.push(format!("{}: {:?} for {}", device, avg_time, base_path));
     } else {
         println!("No valid measurements for {} on {}", base_path, device);
+    }
+
+    // Non-async benchmark
+    let mut durations_not_async = Vec::new();
+    println!("Running non-async benchmark...");
+    for i in 0..NUMBER_OF_ITERATIONS {
+        let start = Instant::now();
+
+        groth16_prove_not_async(&witness, &zkey, &proof, &public, device, &mut cache_manager)
+            .unwrap();
+
+        let duration = start.elapsed();
+
+        if i >= NUMBER_OF_WARMUP {
+            durations_not_async.push(duration);
+        }
+    }
+
+    if !durations_not_async.is_empty() {
+        let avg_time =
+            durations_not_async.iter().sum::<Duration>() / durations_not_async.len() as u32;
+        println!(
+            "Average running time (not async) for {} on {}: {:?}",
+            base_path, device, avg_time
+        );
+        results.push(format!(
+            "{}: {:?} (not async) for {}",
+            device, avg_time, base_path
+        ));
+    } else {
+        println!(
+            "No valid measurements (not async) for {} on {}",
+            base_path, device
+        );
     }
 }

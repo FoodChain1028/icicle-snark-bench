@@ -10,8 +10,12 @@ use icicle_runtime::{
     stream::IcicleStream,
 };
 
-pub fn ntt_helper(vec: &mut DeviceSlice<F>, inverse: bool, coset_gen: Option<&F>, stream: &IcicleStream)
-where
+pub fn ntt_helper(
+    vec: &mut DeviceSlice<F>,
+    inverse: bool,
+    coset_gen: Option<&F>,
+    stream: &IcicleStream,
+) where
     <F as FieldImpl>::Config: NTT<F, F>,
 {
     let dir = if inverse {
@@ -35,11 +39,12 @@ pub fn msm_helper<C: Curve + MSM<C>>(
     scalars: &(impl HostOrDeviceSlice<C::ScalarField> + ?Sized),
     points: &(impl HostOrDeviceSlice<Affine<C>> + ?Sized),
     stream: &IcicleStream,
+    is_async: bool,
 ) -> DeviceVec<Projective<C>> {
     let mut msm_result = DeviceVec::<Projective<C>>::device_malloc_async(1, stream).unwrap();
     let mut msm_config = MSMConfig::default();
     msm_config.stream_handle = stream.into();
-    msm_config.is_async = true;
+    msm_config.is_async = is_async;
 
     msm(scalars, points, &msm_config, &mut msm_result[..]).unwrap();
 

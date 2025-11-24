@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 icicle-snark = { path = "../../" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "groth16_benchmark"
+harness = false

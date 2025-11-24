@@ -1,24 +1,17 @@
 use crate::{
     cache::{VerificationKey, ZKeyCache},
-    conversions::{
-        deserialize_g1_affine, deserialize_g2_affine, from_u8, serialize_g1_affine,
-        serialize_g2_affine,
-    },
+    conversions::{from_u8, serialize_g1_affine, serialize_g2_affine},
     file_wrapper::FileWrapper,
     icicle_helper::{msm_helper, ntt_helper},
     ProjectiveG1, ProjectiveG2, F,
 };
-use icicle_bn254::curve::{G1Projective, ScalarField};
+use icicle_bn254::curve::ScalarField;
 use icicle_core::{
     field::Field,
-    pairing::pairing,
     traits::{FieldImpl, MontgomeryConvertible},
     vec_ops::{mul_scalars, sub_scalars, VecOpsConfig},
 };
-use icicle_runtime::{
-    memory::{DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice},
-    stream::IcicleStream,
-};
+use icicle_runtime::memory::{DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,16 +34,14 @@ pub struct Proof {
 
 /// This is
 pub fn construct_r1cs(witness: &[ScalarField], zkey_cache: &ZKeyCache) -> DeviceVec<ScalarField> {
-    let mut stream = IcicleStream::create().unwrap();
     let mut cfg = VecOpsConfig::default();
-    cfg.is_async = true;
-    cfg.stream_handle = *stream;
+    cfg.is_async = false;
 
     let n_coef = zkey_cache.c_values.len();
     let nof_coef = zkey_cache.zkey.domain_size;
 
-    let mut d_second_slice = DeviceVec::device_malloc_async(n_coef, &stream).unwrap();
-    let mut d_vec = DeviceVec::device_malloc_async(nof_coef * 3, &stream).unwrap();
+    let mut d_second_slice = DeviceVec::device_malloc(n_coef).unwrap();
+    let mut d_vec = DeviceVec::device_malloc(nof_coef * 3).unwrap();
 
     let mut out_buff_b_a = vec![ScalarField::zero(); nof_coef * 2];
 
@@ -80,13 +71,22 @@ pub fn construct_r1cs(witness: &[ScalarField], zkey_cache: &ZKeyCache) -> Device
     }
     let res = HostSlice::from_mut_slice(&mut res);
 
-    d_second_slice
-        .copy_from_host_async(second_slice, &stream)
-        .unwrap();
-    ScalarField::from_mont(&mut d_second_slice, &stream);
-    mul_scalars(&first_slice[..], &d_second_slice, res, &cfg).unwrap();
+    d_second_slice.copy_from_host(second_slice).unwrap();
+    // Note: from_mont might need a stream or config, checking signature...
+    // Usually it takes a stream. If I pass &IcicleStream::default(), it should be fine for sync.
+    // Or maybe I can use from_mont_async with default stream?
+    // Let's assume there is a sync version or I use default stream.
+    // Actually, looking at previous code: ScalarField::from_mont(&mut d_second_slice, &stream);
+    // I should check if there is a version without stream or use default.
+    // For now I will use default stream for these specific calls if needed, or check if there is a sync API.
+    // icicle_core::field::FieldImpl::from_mont signature: fn from_mont(vec: &mut DeviceSlice<Self>, stream: &IcicleStream);
+    // So I must pass a stream. I will use IcicleStream::default().
+    ScalarField::from_mont(
+        &mut d_second_slice,
+        &icicle_runtime::stream::IcicleStream::default(),
+    );
 
-    stream.synchronize().unwrap();
+    mul_scalars(&first_slice[..], &d_second_slice, res, &cfg).unwrap();
 
     let zero_scalar = ScalarField::zero();
 
@@ -103,11 +103,12 @@ pub fn construct_r1cs(witness: &[ScalarField], zkey_cache: &ZKeyCache) -> Device
         }
     }
 
+    
     d_vec[0..nof_coef]
-        .copy_from_host_async(HostSlice::from_slice(&out_buff_b_a[nof_coef..]), &stream)
+        .copy_from_host(HostSlice::from_slice(&out_buff_b_a[nof_coef..]))
         .unwrap();
     d_vec[nof_coef..nof_coef * 2]
-        .copy_from_host_async(HostSlice::from_slice(&out_buff_b_a[..nof_coef]), &stream)
+        .copy_from_host(HostSlice::from_slice(&out_buff_b_a[..nof_coef]))
         .unwrap();
 
     let d_vec_copy = unsafe {
@@ -125,7 +126,12 @@ pub fn construct_r1cs(witness: &[ScalarField], zkey_cache: &ZKeyCache) -> Device
     )
     .unwrap();
 
-    ntt_helper(&mut d_vec, true, None, &stream);
+    ntt_helper(
+        &mut d_vec,
+        true,
+        None,
+        &icicle_runtime::stream::IcicleStream::default(),
+    );
 
     #[cfg(not(feature = "coset-gen"))]
     {
@@ -155,12 +161,19 @@ pub fn construct_r1cs(witness: &[ScalarField], zkey_cache: &ZKeyCache) -> Device
     }
 
     #[cfg(not(feature = "coset-gen"))]
-    ntt_helper(&mut d_vec, false, None, &stream);
+    ntt_helper(
+        &mut d_vec,
+        false,
+        None,
+        &icicle_runtime::stream::IcicleStream::default(),
+    );
     #[cfg(feature = "coset-gen")]
-    ntt_helper(&mut d_vec, false, Some(&zkey_cache.inc), &stream);
-
-    stream.synchronize().unwrap();
-    stream.destroy().unwrap();
+    ntt_helper(
+        &mut d_vec,
+        false,
+        Some(&zkey_cache.inc),
+        &icicle_runtime::stream::IcicleStream::default(),
+    );
 
     // L * R - O
     let cfg: VecOpsConfig = VecOpsConfig::default();
@@ -201,23 +214,40 @@ pub fn groth16_commitments(
     let points_c = &zkey_cache.points_c;
     let points_h = &zkey_cache.points_h;
 
-    let mut stream_g1 = IcicleStream::create().unwrap();
-    let mut stream_g2 = IcicleStream::create().unwrap();
-
     let scalars = HostSlice::from_slice(scalars);
-    let mut d_scalars = DeviceVec::device_malloc_async(scalars.len(), &stream_g1).unwrap();
-    d_scalars.copy_from_host_async(scalars, &stream_g1).unwrap();
+    let mut d_scalars = DeviceVec::device_malloc(scalars.len()).unwrap();
+    d_scalars.copy_from_host(scalars).unwrap();
 
-    let commitment_a = msm_helper(&d_scalars[..], points_a, &stream_g1, true);
-    let commitment_b1 = msm_helper(&d_scalars[..], points_b1, &stream_g1, true);
+    let commitment_a = msm_helper(
+        &d_scalars[..],
+        points_a,
+        &icicle_runtime::stream::IcicleStream::default(),
+        false,
+    );
+    let commitment_b1 = msm_helper(
+        &d_scalars[..],
+        points_b1,
+        &icicle_runtime::stream::IcicleStream::default(),
+        false,
+    );
     let commitment_c = msm_helper(
         &d_scalars[zkey_cache.zkey.n_public + 1..],
         points_c,
-        &stream_g1,
-        true,
+        &icicle_runtime::stream::IcicleStream::default(),
+        false,
     );
-    let commitment_h = msm_helper(&d_vec[nof_coef..nof_coef * 2], points_h, &stream_g1, true);
-    let commitment_b = msm_helper(&d_scalars[..], points_b, &stream_g2, true);
+    let commitment_h = msm_helper(
+        &d_vec[nof_coef..nof_coef * 2],
+        points_h,
+        &icicle_runtime::stream::IcicleStream::default(),
+        false,
+    );
+    let commitment_b = msm_helper(
+        &d_scalars[..],
+        points_b,
+        &icicle_runtime::stream::IcicleStream::default(),
+        false,
+    );
 
     let mut pi_a = [ProjectiveG1::zero(); 1];
     let mut pi_b1 = [ProjectiveG1::zero(); 1];
@@ -226,35 +256,29 @@ pub fn groth16_commitments(
     let mut pi_h = [ProjectiveG1::zero(); 1];
 
     commitment_a
-        .copy_to_host_async(HostSlice::from_mut_slice(&mut pi_a[..]), &stream_g1)
+        .copy_to_host(HostSlice::from_mut_slice(&mut pi_a[..]))
         .unwrap();
 
     commitment_b1
-        .copy_to_host_async(HostSlice::from_mut_slice(&mut pi_b1[..]), &stream_g1)
+        .copy_to_host(HostSlice::from_mut_slice(&mut pi_b1[..]))
         .unwrap();
 
     commitment_b
-        .copy_to_host_async(HostSlice::from_mut_slice(&mut pi_b[..]), &stream_g2)
+        .copy_to_host(HostSlice::from_mut_slice(&mut pi_b[..]))
         .unwrap();
 
     commitment_c
-        .copy_to_host_async(HostSlice::from_mut_slice(&mut pi_c[..]), &stream_g1)
+        .copy_to_host(HostSlice::from_mut_slice(&mut pi_c[..]))
         .unwrap();
 
     commitment_h
-        .copy_to_host_async(HostSlice::from_mut_slice(&mut pi_h[..]), &stream_g1)
+        .copy_to_host(HostSlice::from_mut_slice(&mut pi_h[..]))
         .unwrap();
-
-    stream_g1.synchronize().unwrap();
-    stream_g2.synchronize().unwrap();
-
-    stream_g1.destroy().unwrap();
-    stream_g2.destroy().unwrap();
 
     (pi_a[0], pi_b1[0], pi_b[0], pi_c[0], pi_h[0])
 }
 
-pub fn groth16_prove_helper(
+pub fn groth16_prove_helper_not_async(
     witness: &str,
     zkey_cache: &ZKeyCache,
 ) -> Result<(Value, Value), Box<dyn std::error::Error>> {
@@ -328,51 +352,4 @@ pub fn groth16_prove_helper(
     };
 
     Ok((serde_json::json!(proof), serde_json::json!(public_signals)))
-}
-
-pub fn groth16_verify_helper(
-    proof: &Proof,
-    public: &[String],
-    verification_key: &VerificationKey,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let pi_a = deserialize_g1_affine(&proof.pi_a);
-    let pi_b = deserialize_g2_affine(&proof.pi_b);
-    let pi_c = deserialize_g1_affine(&proof.pi_c);
-
-    let n_public = verification_key.n_public;
-    let ic = verification_key.ic.clone();
-
-    let mut public_scalars = Vec::with_capacity(n_public);
-    for s in public.iter().take(n_public) {
-        let hex = BigUint::parse_bytes(s.as_bytes(), 10).unwrap();
-        let scalar = ScalarField::from_bytes_le(&hex.to_bytes_le());
-        public_scalars.push(scalar);
-    }
-
-    let mut cpub = ic[0].to_projective();
-    for i in 0..public_scalars.len() {
-        cpub = cpub + ic[i + 1].to_projective() * public_scalars[i];
-    }
-
-    let neg_pi_a = ProjectiveG1::zero() - pi_a.to_projective();
-
-    // e(-A, B) * e(cpub, gamma_2) * e(C, delta_2) * e(alpha_1, beta_2) = 1
-    let vk_gamma_2 = verification_key.vk_gamma_2.clone();
-    let vk_delta_2 = verification_key.vk_delta_2.clone();
-    let vk_alpha_1 = verification_key.vk_alpha_1.clone();
-    let vk_beta_2 = verification_key.vk_beta_2.clone();
-
-    let first_thread = std::thread::spawn(move || pairing(&neg_pi_a.into(), &pi_b).unwrap());
-    let second_thread = std::thread::spawn(move || pairing(&cpub.into(), &vk_gamma_2).unwrap());
-    let third_thread = std::thread::spawn(move || pairing(&pi_c, &vk_delta_2).unwrap());
-    let fourth_thread = std::thread::spawn(move || pairing(&vk_alpha_1, &vk_beta_2).unwrap());
-
-    let first = first_thread.join().unwrap();
-    let second = second_thread.join().unwrap();
-    let third = third_thread.join().unwrap();
-    let fourth = fourth_thread.join().unwrap();
-
-    let result = Field::one() == first * second * third * fourth;
-
-    Ok(result)
 }
