@@ -10,5 +10,13 @@ icicle-snark = { path = "../../" }
 criterion = "0.5"
 
 [[bench]]
-name = "groth16_benchmark"
+name = "rsa_benchmark"
+harness = false
+
+[[bench]]
+name = "400k_benchmark"
+harness = false
+
+[[bench]]
+name = "1600k_benchmark"
 harness = false

@@ -2,9 +2,9 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use icicle_snark::{groth16_prove, groth16_prove_not_async, CacheManager};
 use std::path::Path;
 
-fn rsa_benchmark(c: &mut Criterion) {
+fn circuit_400k_benchmark(c: &mut Criterion) {
     let mut cache_manager = CacheManager::default();
-    let base_path = "../../benchmark/rsa/";
+    let base_path = "../../benchmark/1600k/";
     let witness = format!("{}witness.wtns", base_path);
     let zkey = format!("{}circuit_final.zkey", base_path);
     let proof = format!("{}proof.json", base_path);
@@ -26,7 +26,7 @@ fn rsa_benchmark(c: &mut Criterion) {
         groth16_prove(&witness, &zkey, &proof, &public, device, &mut cache_manager).unwrap();
     }
 
-    let mut group = c.benchmark_group("RSA circuit Proof");
+    let mut group = c.benchmark_group("1600k circuit Proof");
     group.sample_size(10); // Reduce sample size as it takes time
 
     group.bench_function("Async", |b| {
@@ -45,5 +45,5 @@ fn rsa_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, rsa_benchmark);
+criterion_group!(benches, circuit_400k_benchmark);
 criterion_main!(benches);
